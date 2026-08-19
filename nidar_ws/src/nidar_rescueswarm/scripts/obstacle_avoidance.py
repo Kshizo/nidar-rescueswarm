@@ -14,6 +14,15 @@ import json
 import numpy as np
 from datetime import datetime
 
+# Potential-field tuning. The mission cruises at SEARCH_SPEED (2.5 m/s); these
+# ceilings keep total evasion meaningfully below that so the goal always wins in
+# steady state and the drone deflects around obstacles instead of stalling
+# against them. Ratio matters more than absolute value: raising safety_distance
+# makes avoidance start sooner, raising these would make it fight the mission.
+REPULSION_MAX = 1.8     # per-tier lidar repulsion magnitude (m/s)
+EVASION_MAX_H = 1.5     # combined horizontal evasion ceiling (m/s)
+EVASION_MAX_V = 1.2     # combined vertical (climb-over) ceiling (m/s)
+
 class ObstacleAvoidanceModule:
     """
     Robust dual-tier obstacle avoidance module.
@@ -121,7 +130,13 @@ class ObstacleAvoidanceModule:
 
             norm = np.linalg.norm(repulsion_ned[:2])
             if norm > 1e-4:
-                repulsion_ned[:2] = (repulsion_ned[:2] / norm) * 3.5
+                # Deflection strength must stay well below cruise speed or the
+                # goal-seeking velocity and the repulsion cancel and the drone
+                # parks in a local minimum. Reacting EARLIER is the job of
+                # safety_distance (how far out this triggers); it is not the job
+                # of a bigger push. Genuine near-misses are handled by the
+                # collision_imminent override below, which ignores this cap.
+                repulsion_ned[:2] = (repulsion_ned[:2] / norm) * REPULSION_MAX
 
             self.collision_imminent = self.closest_obstacle_dist < self.emergency_distance
             if self.collision_imminent:
@@ -220,11 +235,12 @@ class ObstacleAvoidanceModule:
             swarm_ev = self.compute_swarm_repulsion(my_pos, other_drone_positions, drone_name)
             combined_evasion += swarm_ev
 
-        # Smoothly cap combined evasion vector magnitude to 2.2 m/s max offset
+        # Cap the combined evasion offset so it deflects the commanded velocity
+        # rather than overpowering it (see REPULSION_MAX note above).
         ev_norm = np.linalg.norm(combined_evasion[:2])
-        if ev_norm > 2.2:
-            combined_evasion[:2] = (combined_evasion[:2] / ev_norm) * 2.2
-        combined_evasion[2] = max(-1.2, min(1.2, combined_evasion[2]))
+        if ev_norm > EVASION_MAX_H:
+            combined_evasion[:2] = (combined_evasion[:2] / ev_norm) * EVASION_MAX_H
+        combined_evasion[2] = max(-EVASION_MAX_V, min(EVASION_MAX_V, combined_evasion[2]))
 
         if np.linalg.norm(combined_evasion) > 0.0:
             now = math.floor(datetime.now().timestamp() * 2) / 2

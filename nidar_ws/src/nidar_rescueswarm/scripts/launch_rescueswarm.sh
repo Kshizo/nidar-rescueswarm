@@ -9,7 +9,9 @@ PX4_DIR="${HOME}/PX4-Autopilot"
 PX4_BUILD="${PX4_DIR}/build/px4_sitl_default"
 
 # World file lives in nidar_gazebo package
-NIDAR_WS="${HOME}/Documents/nidar/nidar_ws"
+# Derive the workspace root from this script's own location (scripts/ -> pkg -> src -> ws)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+NIDAR_WS="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
 WORLD_FILE="${NIDAR_WS}/src/nidar_gazebo/worlds/rescueswarm_flood_zone.sdf"
 
 # PX4 model paths
@@ -59,6 +61,29 @@ fi
 export OGRE_RTT_MODE=Copy
 export QT_X11_NO_MITSHM=1
 
+# ------------------------------------------------------------------
+# Force rendering onto the discrete NVIDIA GPU (hybrid-graphics laptops).
+# Without this, gz sim can silently fall back to Mesa llvmpipe and render
+# every camera on the CPU, which pegs all cores and freezes the desktop.
+# Set NIDAR_NO_PRIME=1 to skip (e.g. on a machine with no NVIDIA GPU).
+# ------------------------------------------------------------------
+if [ -z "${NIDAR_NO_PRIME:-}" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    export __NV_PRIME_RENDER_OFFLOAD=1
+    export __GLX_VENDOR_LIBRARY_NAME=nvidia
+    export __VK_LAYER_NV_optimus=NVIDIA_only
+    echo "[INFO] NVIDIA PRIME render offload enabled"
+fi
+
+# HEADLESS=1 runs the Gazebo server only (no GUI window). Sensors still
+# render offscreen, so the mission and the OpenCV viewer work unchanged --
+# this just drops the ~1 full render pass the GUI costs.
+if [ "${HEADLESS:-0}" = "1" ]; then
+    GZ_ARGS="-s -r"
+    echo "[INFO] HEADLESS=1 -> running Gazebo server only (no GUI)"
+else
+    GZ_ARGS="-r"
+fi
+
 # Use PX4's server.config and built system plugins
 export GZ_SIM_SERVER_CONFIG_PATH="${PX4_SERVER_CONFIG}"
 export GZ_SIM_SYSTEM_PLUGIN_PATH="${PX4_BUILD}/src/modules/simulation/gz_plugins:${GZ_SIM_SYSTEM_PLUGIN_PATH:-}"
@@ -74,13 +99,17 @@ echo "[INFO] World file: ${WORLD_FILE}"
 pkill -f "gz sim" 2>/dev/null || true
 pkill -f "ruby.*gz" 2>/dev/null || true
 pkill -f "ros_gz_bridge" 2>/dev/null || true
-sleep 1
+# Stale PX4 SITL instances hold a per-instance lock: a leftover process makes
+# the new one exit with "PX4 server already running for instance N", leaving
+# the mission talking to a PX4 whose Gazebo no longer exists.
+pkill -f "px4_sitl_default/bin/px4" 2>/dev/null || true
+sleep 2
 
 # ------------------------------------------------------------------
 # 3. Launch Gazebo Sim with the flood zone world (background)
 # ------------------------------------------------------------------
 echo "[INFO] Starting Gazebo Sim ..."
-gz sim -r "${WORLD_FILE}" &
+gz sim ${GZ_ARGS} "${WORLD_FILE}" &
 GZ_PID=$!
 sleep 6
 echo "[INFO] Gazebo started (PID: ${GZ_PID})"
@@ -128,7 +157,14 @@ done
 # 5. Start ROS 2 <-> Gazebo Harmonic LiDAR Bridge for Both Drones
 # ------------------------------------------------------------------
 echo "[INFO] Launching ROS 2 LiDAR Bridge for Drone 0 & Drone 1 ..."
-source /opt/ros/humble/setup.bash 2>/dev/null || true
+if [ -z "${ROS_DISTRO:-}" ]; then
+    for _d in jazzy humble iron rolling; do
+        if [ -f "/opt/ros/${_d}/setup.bash" ]; then
+            source "/opt/ros/${_d}/setup.bash"
+            break
+        fi
+    done
+fi
 
 ros2 run ros_gz_bridge parameter_bridge \
   /world/rescueswarm_flood_zone/model/x500_depth_0/link/link/sensor/lidar_2d_v2/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan \

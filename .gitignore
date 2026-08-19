@@ -15,3 +15,11 @@ __pycache__/
 .DS_Store
 *.swp
 *~
+
+# Python virtual environment (84 MB, machine-specific -- recreate with
+# python3 -m venv --system-site-packages .venv; see INSTRUCTIONS.txt)
+.venv/
+venv/
+
+# Per-run mission output (regenerated every flight, accumulates without bound)
+nidar_ws/mission_reports/

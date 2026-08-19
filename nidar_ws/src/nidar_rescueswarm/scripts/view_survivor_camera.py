@@ -9,6 +9,7 @@ and displays real-time OpenCV windows with bounding boxes drawn over red survivo
 import sys
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
 import cv2
@@ -28,21 +29,24 @@ class SurvivorCameraViewerNode(Node):
         self.det_drone1 = False
 
         # ROS 2 Subscribers for Drone 0 & Drone 1 RGB Cameras
+        # Best-effort, depth 1: drop stale frames rather than queue them up.
         self.sub_cam0 = self.create_subscription(
             Image,
             '/drone_0/camera/image_raw',
             self.cb_cam0,
-            10
+            qos_profile_sensor_data
         )
         self.sub_cam1 = self.create_subscription(
             Image,
             '/drone_1/camera/image_raw',
             self.cb_cam1,
-            10
+            qos_profile_sensor_data
         )
 
-        # Timer to render OpenCV windows at 30 FPS
-        self.timer = self.create_timer(0.033, self.render_gui)
+        # Timer to render OpenCV windows at 15 FPS (matches the camera rate --
+        # rendering faster than the sensor publishes just burns CPU redrawing
+        # identical frames).
+        self.timer = self.create_timer(0.066, self.render_gui)
 
         self.get_logger().info("NIDAR Survivor Camera Viewer Started. Listening on /drone_0/camera/image_raw and /drone_1/camera/image_raw ...")
 

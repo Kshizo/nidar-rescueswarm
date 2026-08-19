@@ -1,0 +1,392 @@
+================================================================================
+NIDAR RescueSwarm - SETUP AND RUN INSTRUCTIONS
+================================================================================
+
+How to run the autonomous multi-drone search-and-rescue mission from scratch on
+a fresh machine. No prior knowledge of this project is assumed.
+
+What you will see when it works: two drones lift off a shared launchpad, split
+the search area into west and east sectors, fly a lawnmower pattern, spot red
+survivor capsules with their downward cameras, geolocate each one, fly over it,
+drop an aid kit, then return and land on the pad. A live map updates in your
+browser while they fly, and a report is written when they land.
+
+A full run takes about 6-8 minutes of flight.
+
+
+================================================================================
+1. WHAT YOU NEED
+================================================================================
+
+This was developed and verified on:
+
+    Ubuntu           24.04 LTS
+    ROS 2            Jazzy
+    Gazebo Sim       Harmonic (gz sim 8.11.0)
+    PX4-Autopilot    v1.17.0-alpha (commit 30cbf84fd8)
+    Python           3.12
+    MAVSDK (python)  3.17.2
+    OpenCV           4.6.0
+    NumPy            1.26.4
+
+Other versions may work but have not been tested. ROS 2 Jazzy and Gazebo
+Harmonic are a matched pair -- do not mix a different combination, as the
+ros_gz_bridge will silently fail to pass camera and LiDAR data.
+
+HARDWARE
+    A discrete GPU is strongly recommended. The simulation renders four camera
+    sensors (2 RGB + 2 depth) plus 2 LiDARs in real time. Without GPU
+    acceleration Gazebo falls back to CPU rendering (Mesa llvmpipe), which will
+    peg every core and may freeze your desktop.
+
+    Roughly 8 GB RAM and 20 GB disk (most of it PX4's build).
+
+    Verified on an NVIDIA RTX 5070 Laptop GPU (driver 595.84).
+
+
+================================================================================
+2. INSTALL
+================================================================================
+
+Everything below is a one-time setup. Skip to section 3 if already done.
+
+--------------------------------------------------------------------------------
+2.1  ROS 2 Jazzy
+--------------------------------------------------------------------------------
+Follow the official guide:
+    https://docs.ros.org/en/jazzy/Installation/Ubuntu-Install-Debs.html
+
+Install the desktop variant, then the three extra packages this project needs:
+
+    sudo apt update
+    sudo apt install ros-jazzy-desktop
+    sudo apt install ros-jazzy-ros-gz-bridge ros-jazzy-cv-bridge \
+                     ros-jazzy-message-filters
+
+Verify:
+
+    source /opt/ros/jazzy/setup.bash
+    ros2 --version
+
+--------------------------------------------------------------------------------
+2.2  Gazebo Harmonic
+--------------------------------------------------------------------------------
+ros-jazzy-desktop usually pulls in Gazebo Harmonic already. Check:
+
+    gz sim --version
+
+If that prints 8.x you are done. If the command is not found, install per
+    https://gazebosim.org/docs/harmonic/install_ubuntu
+
+--------------------------------------------------------------------------------
+2.3  PX4-Autopilot
+--------------------------------------------------------------------------------
+PX4 MUST be cloned to your home directory as ~/PX4-Autopilot. The launch script
+looks for exactly that path (see section 7 if you need it elsewhere).
+
+    cd ~
+    git clone https://github.com/PX4/PX4-Autopilot.git --recursive
+    cd ~/PX4-Autopilot
+    bash ./Tools/setup/ubuntu.sh          # installs build dependencies
+    # log out and back in here, so the dialout group membership takes effect
+    make px4_sitl_default                 # first build takes 10-20 minutes
+
+Verify the binary exists:
+
+    ls ~/PX4-Autopilot/build/px4_sitl_default/bin/px4
+
+--------------------------------------------------------------------------------
+2.4  Python environment
+--------------------------------------------------------------------------------
+The only Python package not supplied by ROS is MAVSDK. Because the scripts also
+need rclpy and cv_bridge (which come from the system ROS install and cannot be
+pip-installed), the virtual environment MUST be created with
+--system-site-packages. Omitting that flag is the single most common setup
+mistake and produces "No module named 'rclpy'" at runtime.
+
+    cd <this-repo>
+    python3 -m venv --system-site-packages .venv
+    .venv/bin/pip install mavsdk==3.17.2
+
+Verify all imports resolve:
+
+    .venv/bin/python -c "import mavsdk, rclpy, cv2, cv_bridge, numpy, \
+message_filters; print('all imports OK')"
+
+That command must print "all imports OK" before you continue. Note the scripts
+are run with .venv/bin/python, NOT a bare python3 -- the system interpreter does
+not have mavsdk.
+
+
+================================================================================
+3. RUNNING A MISSION
+================================================================================
+
+You need two terminals. Run every command from the repository root.
+
+--------------------------------------------------------------------------------
+TERMINAL 1 - start the simulator
+--------------------------------------------------------------------------------
+
+    cd nidar_ws/src/nidar_rescueswarm/scripts
+    ./launch_rescueswarm.sh
+
+This generates a brand new randomised world (buildings, trees, towers, debris
+and 10 survivors are different every launch), starts Gazebo, spawns two PX4
+drones on the launchpad, and bridges the camera and LiDAR topics into ROS 2.
+
+Wait for this banner before continuing:
+
+    ==============================================
+      All 2 drones spawned!
+
+Takes roughly 30-60 seconds. Leave this terminal running -- closing it or
+pressing Ctrl+C shuts the whole simulation down.
+
+--------------------------------------------------------------------------------
+TERMINAL 2 - fly the mission
+--------------------------------------------------------------------------------
+
+    cd nidar_ws/src/nidar_rescueswarm/scripts
+    source /opt/ros/jazzy/setup.bash
+    ../../../../.venv/bin/python -u rescueswarm_mission.py
+
+(That is the .venv at the repository root. If the relative path is awkward, use
+the absolute one, e.g. /home/you/nidar_git/.venv/bin/python.)
+
+Near the top of the output you will see:
+
+    [LIVE MAP] http://localhost:8080  (live mission map)
+
+--------------------------------------------------------------------------------
+WATCH IT FLY
+--------------------------------------------------------------------------------
+Open http://localhost:8080 in any browser. The map updates about 5 times a
+second and shows:
+
+    - both drones with heading, and the path they have flown
+    - a red ring around a drone whose camera currently has a survivor in frame
+    - each survivor appearing the moment it is confirmed: orange while its aid
+      kit is pending, turning green once the kit is dropped
+    - live altitude and ground speed, and a table of WGS-84 coordinates
+
+The page is safe to open, close and reopen at any time -- the flown paths are
+recorded by the mission, so joining late still shows you the full history.
+
+OPTIONAL, a third terminal - live camera feed with detection overlay:
+
+    cd nidar_ws/src/nidar_rescueswarm/scripts
+    source /opt/ros/jazzy/setup.bash
+    ../../../../.venv/bin/python view_survivor_camera.py
+
+
+================================================================================
+4. WHAT YOU GET WHEN IT FINISHES
+================================================================================
+
+The mission prints a geotag report to the terminal and writes these files:
+
+    nidar_ws/mission_reports/
+        geotag_map_<YYYYMMDD_HHMMSS>.html   plan view of the whole mission
+        geotag_map_<YYYYMMDD_HHMMSS>.csv    geotag table
+        latest.html                          symlink to the most recent map
+
+Every run adds a new timestamped pair; nothing is overwritten. Open the map
+with:
+
+    xdg-open nidar_ws/mission_reports/latest.html
+
+CSV columns:
+
+    id, lat, lon, east, north, alt, hits, seen_by, delivered
+
+    id         internal track number
+    lat, lon   WGS-84 position (this is the geotag)
+    east,north metres from the launchpad, +East and +North
+    alt        height above ground (distinguishes rooftop from ground casualties)
+    hits       how many camera frames contributed -- see the note in section 6
+    seen_by    which drone(s) saw it
+    delivered  whether the aid kit was dropped
+
+Also written, and OVERWRITTEN by the next run (copy them if you want to keep
+them):
+
+    /tmp/nidar_survivor_geotags.json   raw fused geotag report
+    /tmp/world_layout.json             the generated world, incl. ground truth
+    /tmp/px4_rescueswarm_0.log         PX4 console output, drone 0
+    /tmp/px4_rescueswarm_1.log         PX4 console output, drone 1
+    /tmp/ros_gz_bridge.log             sensor bridge output
+
+The mission process does not exit on its own after printing the report (a known
+issue -- MAVSDK leaves non-daemon threads running). All files are already
+written by that point, so just press Ctrl+C.
+
+
+================================================================================
+5. SHUTTING DOWN
+================================================================================
+
+Ctrl+C in terminal 2 (mission), then Ctrl+C in terminal 1 (simulator).
+
+If anything is left behind, or a later run refuses to start:
+
+    pkill -f rescueswarm_mission.py
+    pkill -f mavsdk_server
+    pkill -f "gz sim"
+    pkill -f "bin/px4"
+    pkill -f parameter_bridge
+
+Always kill mavsdk_server along with the mission. See section 6.
+
+
+================================================================================
+6. TROUBLESHOOTING
+================================================================================
+
+"bind error: Address in use", or the mission connects then immediately dies
+with "Stream removed (Connection reset by peer)"
+    A mavsdk_server from a previous run is still holding UDP 14540/14541. This
+    happens whenever a mission is killed with SIGKILL, because the orphaned
+    server outlives its parent. Fix:
+        pkill -f mavsdk_server
+    Then start the mission again. Confirm the ports are free with:
+        ss -lun | grep -E "14540|14541"     # should print nothing
+
+"ModuleNotFoundError: No module named 'rclpy'"
+    The virtual environment was created without --system-site-packages.
+    Delete .venv and redo section 2.4.
+
+"ModuleNotFoundError: No module named 'mavsdk'"
+    You are running with system python3 instead of .venv/bin/python.
+
+"PX4 server already running for instance N"
+    A previous PX4 is still alive:  pkill -f "bin/px4"
+
+Drones never arm; PX4 log shows "Preflight Fail: No connection to the GCS"
+    This one warning is normal and harmless -- the mission arms via MAVSDK, not
+    a ground station. If arming genuinely fails, look for other errors in
+    /tmp/px4_rescueswarm_0.log.
+
+The desktop freezes, or the simulation crawls
+    Gazebo is rendering on the CPU. Confirm your GPU driver is working
+    (nvidia-smi). Run headless to cut one full render pass:
+        HEADLESS=1 ./launch_rescueswarm.sh
+    Sensors still render offscreen, so the mission and both viewers work
+    normally -- you just lose the 3D window.
+    On a machine with no NVIDIA GPU, set NIDAR_NO_PRIME=1 to skip the PRIME
+    render-offload setup.
+
+Live map shows "no signal", or the page never loads
+    The mission is not running, or port 8080 is taken. If the port is in use the
+    mission prints a warning and flies on without the map. Move it with:
+        NIDAR_LIVE_MAP_PORT=8090 .venv/bin/python -u rescueswarm_mission.py
+
+No camera or LiDAR data (drones fly but never detect anything)
+    The ros_gz_bridge is not passing messages. Check /tmp/ros_gz_bridge.log, and
+    verify topics are live:
+        source /opt/ros/jazzy/setup.bash
+        ros2 topic hz /drone_0/camera/image_raw     # expect roughly 14 Hz
+    A ROS 2 / Gazebo version mismatch is the usual cause.
+
+A survivor was not found
+    Two known causes, both real behaviour rather than faults:
+
+    1. Rooftop survivors at or above the search altitude are invisible. The
+       drones sweep at 8.5 m (CRUISING_ALT in rescueswarm_mission.py) with
+       downward-facing cameras, so a casualty on a building 8 m or taller is
+       never below the drone and never enters frame. The world generator builds
+       houses up to 12.5 m, so this can happen on any given random world.
+
+    2. A survivor confirmed on the very last leg of the sweep may be geotagged
+       correctly but not receive its kit, because the drone reaches the end of
+       its pattern and returns home before it can divert. The coordinate in the
+       report is still good; only the delivery is missed.
+
+Spurious survivors in the report (tracks with a very low "hits" count)
+    A drone hovering low over a casualty it is already servicing can re-detect
+    it with the depth ray landing beside the target, filing a duplicate a few
+    metres away. These are easy to spot: genuine tracks accumulate 60+ camera
+    hits, duplicates typically fewer than 10. Raising min_hits in
+    survivor_registry.py (currently 4) filters them out.
+
+
+================================================================================
+7. CONFIGURATION
+================================================================================
+
+Environment variables (set them before the command, e.g. HEADLESS=1 ./launch...):
+
+    HEADLESS=1              run Gazebo without the 3D window
+    NIDAR_NO_PRIME=1        skip NVIDIA PRIME offload (machines without NVIDIA)
+    NIDAR_LIVE_MAP=0        disable the live map server
+    NIDAR_LIVE_MAP_PORT=N   serve the live map on port N (default 8080)
+    NIDAR_GROUND_TRUTH=1    navigate using the world's answer key instead of
+                            the drones' own detections. Diagnostic only -- it
+                            defeats the point of the exercise.
+
+Tuning constants, near the top of
+nidar_ws/src/nidar_rescueswarm/scripts/rescueswarm_mission.py:
+
+    CRUISING_ALT        8.5   search altitude, metres
+    SEARCH_SPEED        2.5   cruise speed, m/s
+    DETECTION_RADIUS    6.0   how close before a drone commits to a target
+    AVOID_SAFETY_DIST   4.0   obstacle repulsion begins at this distance
+    RTL_ALT            16.0   return-home altitude, clears the tallest obstacle
+
+In survivor_registry.py:
+
+    cluster_radius      3.0   estimates closer than this fuse into one survivor
+    min_hits            4     camera hits before a track is acted on
+
+PX4 installed somewhere other than ~/PX4-Autopilot: edit PX4_DIR at the top of
+launch_rescueswarm.sh.
+
+Number of drones, spawn positions and search sectors: NUM_DRONES and
+DRONE_POSES in launch_rescueswarm.sh must be kept in step with DRONE_PORTS and
+DRONE_SPAWN_POSES in rescueswarm_mission.py.
+
+
+================================================================================
+8. VIEWING RESULTS WITHOUT FLYING
+================================================================================
+
+To re-open the map from a past run, just open the HTML file -- it is fully
+self-contained and needs no server.
+
+To serve the most recent results in the live-map viewer without running a
+mission:
+
+    cd nidar_ws/src/nidar_rescueswarm/scripts
+    ../../../../.venv/bin/python live_map.py
+
+To regenerate the report map by hand from the last mission's raw output:
+
+    ../../../../.venv/bin/python mission_map.py -o /tmp/map.html
+
+
+================================================================================
+9. FILE MAP
+================================================================================
+
+nidar_ws/src/nidar_rescueswarm/scripts/
+    launch_rescueswarm.sh     starts Gazebo, PX4 and the sensor bridge
+    rescueswarm_mission.py    the mission -- run this to fly
+    perception_and_rescue.py  OpenCV survivor detection and 3D geolocation
+    obstacle_avoidance.py     LiDAR and spatial collision avoidance
+    survivor_registry.py      fuses detections, de-duplicates, converts to
+                              latitude/longitude
+    live_map.py               live browser map served during flight
+    mission_map.py            post-mission HTML map and CSV
+    view_survivor_camera.py   live camera window with detection overlay
+
+nidar_ws/src/nidar_gazebo/
+    scripts/generate_random_world.py   builds a fresh random world each launch
+    worlds/rescueswarm_flood_zone.sdf  the generated world (overwritten every
+                                       launch -- do not edit by hand)
+
+nidar_ws/mission_reports/     timestamped maps and CSVs, one pair per run
+
+Note: yolov8n.pt in the scripts directory is left over from an earlier approach
+and is not used. Detection is pure OpenCV HSV colour segmentation.
+
+================================================================================

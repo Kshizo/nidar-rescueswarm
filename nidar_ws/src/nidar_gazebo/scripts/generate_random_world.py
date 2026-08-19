@@ -20,6 +20,22 @@ def generate_random_world(output_sdf_path, layout_json_path="/tmp/world_layout.j
     # Strictly enforce min 10.0m clearance around launch pads for vertical takeoff
     TAKEOFF_CLEARANCE = 10.0
 
+    # Physical shared launchpad: a single 10x10 m deck centred on the origin, so
+    # both spawn points sit on its north/south edges and RTL has a real surface
+    # to come home to. Kept deliberately thin -- PX4 spawns the airframe at
+    # z=0.1, so a taller deck would drop the drone inside its own collision box.
+    LAUNCHPAD_SIZE = 10.0
+    LAUNCHPAD_THICK = 0.05
+    LAUNCHPAD_CENTER = (0.0, 0.0)
+
+    def is_on_launchpad(x, y, margin=0.5):
+        """Ground survivors only need 5 m of spawn clearance, which leaves the
+        pad deck itself reachable (e.g. (4, 0) clears both spawns). Nothing may
+        be generated on the deck the drones land on."""
+        half = LAUNCHPAD_SIZE / 2.0 + margin
+        return (abs(x - LAUNCHPAD_CENTER[0]) <= half and
+                abs(y - LAUNCHPAD_CENTER[1]) <= half)
+
     def is_far_from_spawns(x, y, min_dist=TAKEOFF_CLEARANCE):
         for sx, sy in drone_spawns:
             if math.hypot(x - sx, y - sy) < min_dist:
@@ -173,6 +189,7 @@ def generate_random_world(output_sdf_path, layout_json_path="/tmp/world_layout.j
             gx = round(random.uniform(-22.0, 22.0), 1)
             gy = round(random.uniform(-22.0, 22.0), 1)
             if (is_far_from_spawns(gx, gy, min_dist=5.0) and
+                not is_on_launchpad(gx, gy) and
                 is_far_from_others(gx, gy, all_obstacle_poses, min_dist=3.0) and
                 is_far_from_survivors(gx, gy, min_dist=6.0)):
 
@@ -188,6 +205,11 @@ def generate_random_world(output_sdf_path, layout_json_path="/tmp/world_layout.j
 
     # Save Metadata JSON
     layout_data = {
+        "launchpad": {
+            "x": LAUNCHPAD_CENTER[0], "y": LAUNCHPAD_CENTER[1],
+            "size": LAUNCHPAD_SIZE, "thickness": LAUNCHPAD_THICK,
+            "spawns": [list(sp) for sp in drone_spawns],
+        },
         "houses": obstacle_metadata,
         "trees": placed_trees,
         "towers": placed_towers,
@@ -256,6 +278,44 @@ def generate_random_world(output_sdf_path, layout_json_path="/tmp/world_layout.j
       <specular>0.271 0.271 0.271 1</specular>
       <attenuation><range>2000</range><linear>0</linear><constant>1</constant><quadratic>0</quadratic></attenuation>
     </light>
+
+    <!-- Shared 10x10 m launchpad. Both drones spawn on its N/S edges and RTL
+         returns them here. Thin deck (see LAUNCHPAD_THICK) so the z=0.1 spawn
+         sits above the surface rather than inside it. -->
+    <model name="launchpad">
+      <static>true</static>
+      <pose>{LAUNCHPAD_CENTER[0]} {LAUNCHPAD_CENTER[1]} {LAUNCHPAD_THICK/2.0} 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>{LAUNCHPAD_SIZE} {LAUNCHPAD_SIZE} {LAUNCHPAD_THICK}</size></box></geometry>
+          <surface><friction><ode><mu>1.0</mu><mu2>1.0</mu2></ode></friction></surface>
+        </collision>
+        <visual name="deck">
+          <geometry><box><size>{LAUNCHPAD_SIZE} {LAUNCHPAD_SIZE} {LAUNCHPAD_THICK}</size></box></geometry>
+          <material><ambient>0.16 0.17 0.19 1</ambient><diffuse>0.22 0.23 0.26 1</diffuse></material>
+        </visual>
+        <visual name="border">
+          <pose>0 0 {LAUNCHPAD_THICK*0.55} 0 0 0</pose>
+          <geometry><box><size>{LAUNCHPAD_SIZE-0.6} {LAUNCHPAD_SIZE-0.6} {LAUNCHPAD_THICK*0.2}</size></box></geometry>
+          <material><ambient>0.85 0.85 0.15 1</ambient><diffuse>0.95 0.95 0.2 1</diffuse></material>
+        </visual>
+        <visual name="deck_inner">
+          <pose>0 0 {LAUNCHPAD_THICK*0.62} 0 0 0</pose>
+          <geometry><box><size>{LAUNCHPAD_SIZE-1.4} {LAUNCHPAD_SIZE-1.4} {LAUNCHPAD_THICK*0.2}</size></box></geometry>
+          <material><ambient>0.16 0.17 0.19 1</ambient><diffuse>0.22 0.23 0.26 1</diffuse></material>
+        </visual>
+        <visual name="mark_v">
+          <pose>0 0 {LAUNCHPAD_THICK*0.7} 0 0 0</pose>
+          <geometry><box><size>1.0 4.4 {LAUNCHPAD_THICK*0.2}</size></box></geometry>
+          <material><ambient>0.85 0.85 0.15 1</ambient><diffuse>0.95 0.95 0.2 1</diffuse></material>
+        </visual>
+        <visual name="mark_h">
+          <pose>0 0 {LAUNCHPAD_THICK*0.7} 0 0 0</pose>
+          <geometry><box><size>3.0 1.0 {LAUNCHPAD_THICK*0.2}</size></box></geometry>
+          <material><ambient>0.85 0.85 0.15 1</ambient><diffuse>0.95 0.95 0.2 1</diffuse></material>
+        </visual>
+      </link>
+    </model>
 """
 
     # Add Houses to SDF
@@ -365,6 +425,9 @@ def generate_random_world(output_sdf_path, layout_json_path="/tmp/world_layout.j
 
 
 if __name__ == "__main__":
-    nidar_ws = os.path.expanduser("~/Documents/nidar/nidar_ws")
+    # Derive the workspace root from this file's location (scripts/ -> pkg -> src -> ws)
+    nidar_ws = os.path.abspath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..")
+    )
     sdf_path = os.path.join(nidar_ws, "src/nidar_gazebo/worlds/rescueswarm_flood_zone.sdf")
     generate_random_world(sdf_path)

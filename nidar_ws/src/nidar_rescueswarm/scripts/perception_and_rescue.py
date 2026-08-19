@@ -18,7 +18,11 @@ DRONE_SPAWN_POSES = [
 ]
 
 class SurvivorDetectorAndDropper:
-    def __init__(self, fx=400.0, fy=400.0, cx=320.0, cy=240.0):
+    # Intrinsics derived from the sensor definition rather than guessed:
+    # fx = fy = (width/2) / tan(hfov/2) = 320 / tan(1.204/2) = 465.7 for the
+    # 640x480 IMX214. The depth camera's hfov is matched to the RGB one in the
+    # OakD-Lite SDF, so a single intrinsic set is valid for both.
+    def __init__(self, fx=465.7, fy=465.7, cx=320.0, cy=240.0):
         self.fx = fx
         self.fy = fy
         self.cx = cx
@@ -28,11 +32,14 @@ class SurvivorDetectorAndDropper:
     def get_timestamp(self):
         return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
-    def detect_red_survivor(self, rgb_image, drone_name="Drone-0"):
+    def detect_red_survivor(self, rgb_image, drone_name="Drone-0", draw_debug=True):
         if rgb_image is None:
             return False, 0, 0, (0, 0, 0, 0), None
 
-        debug_img = rgb_image.copy()
+        # The debug overlay is only needed by the viewer HUD. Callers that throw
+        # it away (the mission controller) pass draw_debug=False to skip a full
+        # frame copy on every callback.
+        debug_img = rgb_image.copy() if draw_debug else None
         hsv = cv2.cvtColor(rgb_image, cv2.COLOR_BGR2HSV)
 
         lower_red1 = np.array([0, 120, 70])
@@ -68,15 +75,24 @@ class SurvivorDetectorAndDropper:
             u_c = x + w // 2
             v_c = y + h // 2
 
-            cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            cv2.circle(debug_img, (u_c, v_c), 5, (0, 0, 255), -1)
+            if debug_img is not None:
+                cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.circle(debug_img, (u_c, v_c), 5, (0, 0, 255), -1)
 
             print(f"[{self.get_timestamp()}] [{drone_name}] [NADIR CAMERA] Red Survivor in Frame | BBox: ({x}, {y}, {w}, {h}) | Centroid: ({u_c}, {v_c}) | Area: {int(max_area)}px")
             return True, u_c, v_c, (x, y, w, h), debug_img
 
         return False, 0, 0, (0, 0, 0, 0), debug_img
 
-    def estimate_3d_location(self, u_c, v_c, depth_image, drone_pos_ned, drone_yaw_deg, drone_name="Drone-0"):
+    def estimate_3d_location(self, u_c, v_c, depth_image, drone_pos_ned, drone_att_rad,
+                             drone_name="Drone-0", verbose=True):
+        """Pixel + depth -> survivor position in the drone's local NED frame.
+
+        drone_att_rad is (roll, pitch, yaw) in radians. All three are required:
+        a yaw-only rotation is correct in level hover, but at SEARCH_SPEED the
+        airframe carries real pitch, and ignoring a tilt of alpha displaces the
+        target by roughly Z*sin(alpha) -- over a metre at cruise.
+        """
         if depth_image is None:
             return None
 
@@ -94,22 +110,33 @@ class SurvivorDetectorAndDropper:
 
         z_depth = float(np.median(valid_depths))
 
-        dx_body = (self.cy - v_c) * z_depth / self.fy
-        dy_body = (u_c - self.cx) * z_depth / self.fx
-        dz_body = z_depth
+        # Deproject the pixel through the pinhole model into the body FRD frame.
+        # The camera is nadir with the image top toward the nose, so image "up"
+        # maps to Forward, image "right" to Right, and the optical axis to Down.
+        dx_body = (self.cy - v_c) * z_depth / self.fy   # Forward
+        dy_body = (u_c - self.cx) * z_depth / self.fx   # Right
+        dz_body = z_depth                               # Down
 
-        yaw_rad = math.radians(drone_yaw_deg)
-        cos_y, sin_y = math.cos(yaw_rad), math.sin(yaw_rad)
+        # Full 3-2-1 (yaw-pitch-roll) body->NED direction cosine matrix.
+        roll, pitch, yaw = drone_att_rad
+        cr, sr = math.cos(roll), math.sin(roll)
+        cp, sp = math.cos(pitch), math.sin(pitch)
+        cy_, sy_ = math.cos(yaw), math.sin(yaw)
 
-        offset_north = dx_body * cos_y - dy_body * sin_y
-        offset_east  = dx_body * sin_y + dy_body * cos_y
-        offset_down  = dz_body
+        R = np.array([
+            [cy_ * cp, cy_ * sp * sr - sy_ * cr, cy_ * sp * cr + sy_ * sr],
+            [sy_ * cp, sy_ * sp * sr + cy_ * cr, sy_ * sp * cr - cy_ * sr],
+            [-sp,      cp * sr,                  cp * cr                 ],
+        ])
 
-        survivor_north = drone_pos_ned[0] + offset_north
-        survivor_east  = drone_pos_ned[1] + offset_east
-        survivor_down  = drone_pos_ned[2] + offset_down
+        offset_north, offset_east, offset_down = R @ np.array([dx_body, dy_body, dz_body])
 
-        print(f"[{self.get_timestamp()}] [{drone_name}] [NADIR DEPTH ESTIMATION] Measured Depth z={z_depth:.2f}m -> Target Local NED (North: {survivor_north:.2f}m, East: {survivor_east:.2f}m, Alt: {-survivor_down:.2f}m)")
+        survivor_north = drone_pos_ned[0] + float(offset_north)
+        survivor_east  = drone_pos_ned[1] + float(offset_east)
+        survivor_down  = drone_pos_ned[2] + float(offset_down)
+
+        if verbose:
+            print(f"[{self.get_timestamp()}] [{drone_name}] [NADIR DEPTH ESTIMATION] Measured Depth z={z_depth:.2f}m -> Target Local NED (North: {survivor_north:.2f}m, East: {survivor_east:.2f}m, Alt: {-survivor_down:.2f}m)")
         return (survivor_north, survivor_east, survivor_down)
 
     def drop_rescue_package(self, survivor_world_pos_ned, drone_hover_alt=None, drone_id=0, drone_name="Drone-0"):
@@ -133,7 +160,7 @@ class SurvivorDetectorAndDropper:
 
         sdf_str = f"<?xml version='1.0'?><sdf version='1.9'><model name='{pkg_name}'><pose>{gz_x} {gz_y} {gz_z_spawn} 0 0 0</pose><static>false</static><link name='box_link'><visual name='v'><geometry><box><size>0.40 0.40 0.30</size></box></geometry><material><ambient>1 0.4 0 1</ambient><diffuse>1 0.5 0 1</diffuse><specular>0.8 0.8 0.8 1</specular></material></visual><collision name='c'><geometry><box><size>0.40 0.40 0.30</size></box></geometry><material><ambient>1 0.4 0 1</ambient><diffuse>1 0.5 0 1</diffuse></material></collision><inertial><mass>0.5</mass><inertia><ixx>0.005</ixx><ixy>0</ixy><ixz>0</ixz><iyy>0.005</iyy><iyz>0</iyz><izz>0.005</izz></inertia></inertial></link></model></sdf>"
 
-        gz_cmd = f"source /opt/ros/humble/setup.bash 2>/dev/null; gz service -s /world/rescueswarm_flood_zone/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 3000 --req \"sdf: \\\"{sdf_str}\\\", name: \\\"{pkg_name}\\\", pose: {{position: {{x: {gz_x}, y: {gz_y}, z: {gz_z_spawn}}}}}\" || ros2 run ros_gz_sim create -world rescueswarm_flood_zone -string \"{sdf_str}\" -name {pkg_name} -x {gz_x} -y {gz_y} -z {gz_z_spawn}"
+        gz_cmd = f"source /opt/ros/${{ROS_DISTRO:-jazzy}}/setup.bash 2>/dev/null; gz service -s /world/rescueswarm_flood_zone/create --reqtype gz.msgs.EntityFactory --reptype gz.msgs.Boolean --timeout 3000 --req \"sdf: \\\"{sdf_str}\\\", name: \\\"{pkg_name}\\\", pose: {{position: {{x: {gz_x}, y: {gz_y}, z: {gz_z_spawn}}}}}\" || ros2 run ros_gz_sim create -world rescueswarm_flood_zone -string \"{sdf_str}\" -name {pkg_name} -x {gz_x} -y {gz_y} -z {gz_z_spawn}"
 
         try:
             subprocess.Popen(gz_cmd, shell=True, executable='/bin/bash', stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

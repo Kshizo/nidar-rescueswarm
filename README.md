@@ -74,6 +74,32 @@ python3 nidar_ws/src/nidar_rescueswarm/scripts/rescueswarm_mission.py
 
 ---
 
+## 🎥 Real-Flight Survivor Detection (offline)
+
+On the real drone, survivors are people, not red capsules. The Raspberry Pi 5
+records the downward webcam and the flight controller's telemetry on one clock;
+detection and geotagging run afterwards on a GPU laptop.
+
+```bash
+# 1. Once per webcam (same resolution you fly at, autofocus off)
+python3 scripts/calibrate_camera.py --camera 0 --width 1280 --height 720
+
+# 2. On the Pi, during the flight (PX4 TELEM2 -> Pi UART)
+python3 scripts/flight_recorder.py --mavlink /dev/ttyAMA0 --baud 921600 --fps 15
+
+# 3. On the laptop, after landing
+python3 scripts/process_flight.py ~/flights/flight_YYYYmmdd_HHMMSS --calib webcam_calib.yaml
+```
+
+Paths are relative to `nidar_ws/src/nidar_rescueswarm/`. Step 3 writes
+`results/survivors.{csv,geojson,kml}` plus a crop of every survivor for
+visual confirmation. The YOLO26 person model (VisDrone + C2A + SARD +
+HERIDAL) and how to retrain it are in
+[`training/README.md`](nidar_ws/src/nidar_rescueswarm/training/README.md).
+Live detection in the sim stays on HSV unless `NIDAR_DETECTOR=yolo` is set.
+
+---
+
 ## 🛡️ Technical Highlights
 
 ### Collision Avoidance System

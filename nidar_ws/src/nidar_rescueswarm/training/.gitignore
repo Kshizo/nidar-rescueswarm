@@ -1,0 +1,4 @@
+runs/
+*.log
+# pretrained checkpoints Ultralytics downloads on first run
+yolo*.pt

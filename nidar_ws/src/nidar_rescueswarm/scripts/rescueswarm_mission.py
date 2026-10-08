@@ -28,6 +28,7 @@ from mavsdk.offboard import OffboardError, VelocityNedYaw
 
 from obstacle_avoidance import ObstacleAvoidanceModule
 from perception_and_rescue import SurvivorDetectorAndDropper
+from person_detector import make_detect_fn
 from survivor_registry import SurvivorRegistry
 import mission_map
 import live_map
@@ -185,6 +186,9 @@ class RosSensorSubscriberNode(Node):
         super().__init__('ros_sensor_subscriber_node')
         self.bridge = CvBridge()
         self.perception = SurvivorDetectorAndDropper()
+        # NIDAR_DETECTOR=yolo swaps the red-capsule HSV detector for the
+        # overhead person model on real flights; geolocation is shared.
+        self.detect = make_detect_fn(self.perception)
 
         # Sensor QoS = best-effort, depth 1. With the default reliable depth-10
         # queue, image messages pile up faster than OpenCV can drain them and
@@ -221,7 +225,7 @@ class RosSensorSubscriberNode(Node):
         """Detect in RGB, then geolocate through the time-matched depth frame."""
         try:
             cv_img = self.bridge.imgmsg_to_cv2(rgb_msg, desired_encoding='bgr8')
-            detected, u_c, v_c, bbox, _ = self.perception.detect_red_survivor(
+            detected, u_c, v_c, bbox, _ = self.detect(
                 cv_img, f"Drone-{drone_idx}", draw_debug=False
             )
             latest_camera_detections[drone_idx] = {
